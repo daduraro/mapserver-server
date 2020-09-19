@@ -1,0 +1,5 @@
+CREATE TABLE maps (
+  id INTEGER NOT NULL PRIMARY KEY,
+  keystr TEXT NOT NULL,
+  fpath  TEXT NOT NULL
+);

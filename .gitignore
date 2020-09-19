@@ -1,0 +1,4 @@
+/target
+/static
+*.db
+schema.rs
