@@ -4,6 +4,10 @@ version = "0.0.1"
 authors = ["David Duran i Rosich <david.duran.rosich@gmail.com>"]
 edition = "2018"
 
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
 [dependencies]
 # Logger
 env_logger = "0.7"

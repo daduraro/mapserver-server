@@ -1,4 +1,5 @@
 /target
 /static
+/data
 *.db
 schema.rs
