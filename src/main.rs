@@ -2,7 +2,7 @@ use actix_web::{middleware, web, App, HttpResponse, HttpRequest, HttpServer, Err
 use diesel::{SqliteConnection};
 use diesel::r2d2::{self,ConnectionManager};
 
-// the next old macro import style is needed for schema.rs
+// old macro import style is needed for schema.rs
 #[macro_use]
 extern crate diesel;
 
@@ -11,7 +11,6 @@ mod db;
 
 async fn map_handler(req: HttpRequest, pool: web::Data<db::Pool>) -> Result<HttpResponse, Error> {
     let keystr =  req.match_info().get("map").unwrap().to_owned();
-
     let conn = pool.get().expect("couldn't get db connection from pool");
     
     let map = web::block(move || db::actions::find_map_by_keystr(&keystr, &conn))
@@ -24,7 +23,7 @@ async fn map_handler(req: HttpRequest, pool: web::Data<db::Pool>) -> Result<Http
     if let Some(map) = map {
         Ok(HttpResponse::Ok().body(format!("You found {}!", map.keystr)))
     } else {
-        Ok(HttpResponse::NotFound().body(""))
+        Ok(HttpResponse::NotFound().finish())
     }
 }
 
@@ -44,7 +43,7 @@ async fn main() -> std::io::Result<()> {
         .build(manager)
         .expect("Failed to create pool.");
 
-    let bind = "127.0.0.1:8080";
+    let bind = "127.0.0.1:80";
     println!("Starting server at: {}", &bind);
 
     HttpServer::new(move || {
