@@ -1,6 +1,13 @@
-use actix_web::{middleware, web, App, HttpResponse, HttpRequest, HttpServer, Error};
+use actix_web::{middleware, web, error, http::header, guard, get, App, HttpResponse, HttpRequest, HttpServer, Error};
+use actix_files as fs;
 use diesel::{SqliteConnection};
 use diesel::r2d2::{self,ConnectionManager};
+use std::path::{Path,PathBuf};
+use std::fs::File;
+use serde::{Serialize, Deserialize};
+use regex::Regex;
+use std::io::prelude::*;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 // old macro import style is needed for schema.rs
 #[macro_use]
@@ -9,22 +16,221 @@ extern crate diesel;
 mod models;
 mod db;
 
-async fn map_handler(req: HttpRequest, pool: web::Data<db::Pool>) -> Result<HttpResponse, Error> {
-    let keystr =  req.match_info().get("map").unwrap().to_owned();
+async fn get_map(req: &HttpRequest, pool: &db::Pool) -> Result<Option<models::Map>, Error> {
+    let keystr =  req.match_info().get("mapid").unwrap().to_owned();
     let conn = pool.get().expect("couldn't get db connection from pool");
-    
     let map = web::block(move || db::actions::find_map_by_keystr(&keystr, &conn))
         .await
         .map_err(|e| {
             eprintln!("{}", e);
-            HttpResponse::InternalServerError().finish()
+            e
         })?;
+    Ok(map)
+}
 
+fn internal_error() -> Error {
+    error::ErrorInternalServerError(std::io::Error::new(std::io::ErrorKind::Other, "Internal Error"))
+}
+
+struct PointIdCounter {
+    count: AtomicI32,
+}
+
+#[derive(Serialize)]
+struct MapData {
+    img_url: String,
+    img_width: u32,
+    img_height: u32,
+}
+
+async fn get_map_info(map: &models::Map) -> Result<MapData, Error> {
+    let contents = {
+        let path: PathBuf = ["data/maps", &map.fpath[..], "ImageProperties.xml"].iter().collect();
+        let mut file = 
+            web::block(move || File::open(path))
+            .await
+            .map_err(|e| match e {
+                error::BlockingError::Error(internal) => error::ErrorNotFound(internal),
+                _ => e.into()
+            })?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        contents
+    };
+
+    let img_width: u32 = {
+        let width_regex: Regex = Regex::new(r#"WIDTH="(\d+)""#).unwrap();
+        width_regex.captures(&contents[..]).ok_or_else(internal_error)?
+            .get(1).ok_or_else(internal_error)?
+            .as_str().parse().unwrap()
+    };
+
+    let img_height: u32 = {
+        let height_regex: Regex = Regex::new(r#"HEIGHT="(\d+)""#).unwrap();
+        height_regex.captures(&contents[..]).ok_or_else(internal_error)?
+            .get(1).ok_or_else(internal_error)?
+            .as_str().parse().unwrap()
+    };
+
+    let img_url: PathBuf = ["maps", &map.fpath[..], ""].iter().collect();
+    let img_url = img_url.to_str().ok_or_else(internal_error)?.to_owned();
+
+    Ok(MapData {
+        img_url,
+        img_height,
+        img_width,
+    })
+}
+
+async fn data_json(req: HttpRequest, pool: web::Data<db::Pool>) -> Result<HttpResponse, Error> {
+    let map = get_map(&req, pool.as_ref()).await?;
     if let Some(map) = map {
-        Ok(HttpResponse::Ok().body(format!("You found {}!", map.keystr)))
+        let body = serde_json::to_string(&get_map_info(&map).await?)?;
+        Ok(HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body)
+        )
     } else {
         Ok(HttpResponse::NotFound().finish())
     }
+}
+
+#[derive(Serialize)]
+struct CreatePointResponse {
+    id: i64,
+}
+
+async fn create_point(req: HttpRequest, payload: web::Json<Vec<f32>>, pool: web::Data<db::Pool>, point_id_factory: web::Data<PointIdCounter>) -> Result<HttpResponse, Error> {
+    let map = get_map(&req, pool.as_ref()).await?;
+    if let Some(map) = map {
+
+        let point_id = point_id_factory.count.fetch_add(1, Ordering::SeqCst);
+
+        //let coordinates = web::Json<Vec<f64>>::from(req);
+        let conn = pool.get().expect("couldn't get db connection from pool");
+
+        let coordx = *payload.get(0).ok_or_else(internal_error)?;
+        let coordy = *payload.get(1).ok_or_else(internal_error)?;
+
+        web::block(move || db::actions::insert_point(&models::Point{ 
+            id: point_id,
+            mapid: map.id,
+            coordx,
+            coordy,
+            title: None,
+            body: None,
+        }, &conn)).await?;
+
+        let body = serde_json::to_string(&CreatePointResponse{id: point_id as i64})?;
+        Ok(HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body)
+        )
+    } else {
+        Ok(HttpResponse::Forbidden().finish())
+    }
+}
+
+
+#[derive(Serialize)]
+struct GetPointsResponse {
+    id: i32,
+    coordinate: (f32, f32),
+    title: String,
+    descr: String,
+}
+
+impl From<models::Point> for GetPointsResponse {
+    fn from(point: models::Point) -> Self {
+        GetPointsResponse {
+            id: point.id,
+            coordinate: (point.coordx, point.coordy),
+            title: point.title.unwrap_or_else(String::new),
+            descr: point.body.unwrap_or_else(String::new),
+        }
+    }
+}
+
+async fn get_points(req: HttpRequest, pool: web::Data<db::Pool>) -> Result<HttpResponse, Error> {
+    let keystr =  req.match_info().get("mapid").unwrap().to_owned();
+    let conn = pool.get().expect("couldn't get db connection from pool");
+    let points = web::block(move || db::actions::get_points_in_map(&keystr, &conn)).await?;
+    let points: Vec<GetPointsResponse> = points.into_iter().map(|e| e.into()).collect();
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .body(serde_json::to_string(&points)?)
+    )
+}
+
+#[derive(Deserialize)]
+struct DeletePointRequest {
+    id: i32
+}
+
+async fn delete_point(req: HttpRequest, payload: web::Json<DeletePointRequest>, pool: web::Data<db::Pool>) -> Result<HttpResponse, Error> {
+    let keystr =  req.match_info().get("mapid").unwrap().to_owned();
+    let conn = pool.get().expect("couldn't get db connection from pool");
+    web::block(move || db::actions::delete_points_in_map(&keystr, payload.id, &conn)).await?;
+    Ok(HttpResponse::Ok()
+        .finish()
+    )
+}
+
+#[derive(Deserialize)]
+struct ModifyPointRequest {
+    id: i32,
+    title: String,
+    descr: String,
+}
+
+impl Into<models::PointUpdate> for ModifyPointRequest {
+    fn into(self) -> models::PointUpdate {
+        models::PointUpdate{
+            id: self.id,
+            title: if self.title == "" { Some(None) } else { Some(Some(self.title)) },
+            body: if self.descr == "" { Some(None) } else { Some(Some(self.descr)) },
+        }
+    }
+}
+
+async fn modify_point(req: HttpRequest, payload: web::Json<ModifyPointRequest>, pool: web::Data<db::Pool>) -> Result<HttpResponse, Error> {
+    let keystr =  req.match_info().get("mapid").unwrap().to_owned();
+    let conn = pool.get().expect("couldn't get db connection from pool");
+    web::block(move || db::actions::modify_point_in_map(&keystr, &payload.0.into(), &conn)).await?;
+    Ok(HttpResponse::Ok()
+        .finish()
+    )
+}
+
+// fetch("modify_point", {
+//     method: 'PUT',
+//     headers: {
+//       'Accept': 'application/json',
+//       'Content-Type': 'application/json'
+//     },
+//     body: JSON.stringify({id: await e.info.id, ...e.info})
+//   })
+
+#[get("/")]
+async fn redirect_index(_req: HttpRequest) -> Result<HttpResponse, Error> {
+    Ok(HttpResponse::Found()
+        .header(header::LOCATION, "index.html")
+        .finish()
+    )
+}
+
+#[get("/{filename:.*}/")]
+async fn index(req: HttpRequest) -> Result<fs::NamedFile, Error> {
+    let path: std::path::PathBuf = req.match_info().query("filename").parse().unwrap();
+    let file = fs::NamedFile::open(Path::new("data/www").join(path))?;
+    Ok(file)
+}
+
+#[get("/maps/{filename:.*}/")]
+async fn map_imgs(req: HttpRequest) -> Result<fs::NamedFile, Error> {
+    let path: std::path::PathBuf = req.match_info().query("filename").parse().unwrap();
+    let file = fs::NamedFile::open(Path::new("data/maps").join(path))?;
+    Ok(file)
 }
 
 #[actix_web::main]
@@ -43,17 +249,57 @@ async fn main() -> std::io::Result<()> {
         .build(manager)
         .expect("Failed to create pool.");
 
-    let bind = "127.0.0.1:80";
+    let id_counter = web::Data::new(PointIdCounter {
+        count: AtomicI32::new( db::actions::count_points(&pool.get().unwrap()).unwrap() ),
+    });
+
+    let bind = std::env::var("SERVER_ADDR").expect("no env variable SERVER_ADDR");
     println!("Starting server at: {}", &bind);
 
     HttpServer::new(move || {
         App::new()
         .data(pool.clone())
-        .wrap(middleware::Logger::default())
-        .service(
-            web::scope("/maps")
-                .route("/{map}", web::get().to(map_handler))
+        .app_data(id_counter.clone())
+        .app_data(web::JsonConfig::default()
+            .limit(4096)
+            .error_handler(|err, _req| {
+                error::InternalError::from_response(err, HttpResponse::Conflict().finish()).into()
+            })
         )
+        .wrap(middleware::Logger::default())
+        .wrap(middleware::NormalizePath::default())
+        .service(
+            web::scope(r"/map/{mapid:\w+}")
+                // API
+                .service(web::resource("/create_point/")
+                    .guard(guard::Header("accept", "application/json"))
+                    .guard(guard::Header("content-type", "application/json"))
+                    .route(web::post().to(create_point))
+                )
+                .service(web::resource("/data.json/")
+                    .guard(guard::Header("accept", "application/json"))
+                    .route(web::get().to(data_json))
+                )
+                .service(web::resource("/get_points/")
+                    .guard(guard::Header("accept", "application/json"))
+                    .route(web::get().to(get_points))
+                )
+                .service(web::resource("/delete_point/")
+                    .guard(guard::Header("content-type", "application/json"))
+                    .route(web::delete().to(delete_point))
+                )
+                .service(web::resource("/modify_point/")
+                    .guard(guard::Header("content-type", "application/json"))
+                    .route(web::put().to(modify_point))
+                )
+
+                // static resources
+                .service(redirect_index)
+                .service(map_imgs)
+                .service(index)
+        )
+        // .service()
+        // .service(fs::Files::new("/static", "./data/www").show_files_listing())
     })
     .bind(&bind)?
     .run()
