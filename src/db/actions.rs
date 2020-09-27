@@ -62,6 +62,7 @@ pub fn modify_point_in_map(map_key: &str, req: &models::PointUpdate, conn: &Sqli
     println!("Modify {:?}", req);
     use super::schema::*;
     diesel::update(points::table
+        .filter(points::id.eq(req.id))
         .filter(points::mapid.eq_any( maps::table.filter(maps::keystr.eq(&map_key)).select(maps::id) ))
     )
     .set(req)

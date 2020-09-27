@@ -43,9 +43,9 @@ struct MapData {
     img_height: u32,
 }
 
-async fn get_map_info(map: &models::Map) -> Result<MapData, Error> {
+async fn get_map_info(map: &models::Map, path: &Path) -> Result<MapData, Error> {
     let contents = {
-        let path: PathBuf = ["data/maps", &map.fpath[..], "ImageProperties.xml"].iter().collect();
+        let path: PathBuf = [path, Path::new("maps"),  Path::new(&map.fpath), Path::new("ImageProperties.xml")].iter().collect();
         let mut file = 
             web::block(move || File::open(path))
             .await
@@ -82,10 +82,12 @@ async fn get_map_info(map: &models::Map) -> Result<MapData, Error> {
     })
 }
 
-async fn data_json(req: HttpRequest, pool: web::Data<db::Pool>) -> Result<HttpResponse, Error> {
+async fn data_json(req: HttpRequest, pool: web::Data<db::Pool>, paths: web::Data<DataPaths>) -> Result<HttpResponse, Error> {
+    println!("hey?");
     let map = get_map(&req, pool.as_ref()).await?;
     if let Some(map) = map {
-        let body = serde_json::to_string(&get_map_info(&map).await?)?;
+        println!("map is {:?}", map);
+        let body = serde_json::to_string(&get_map_info(&map, &paths.data_path).await?)?;
         Ok(HttpResponse::Ok()
             .content_type("application/json")
             .body(body)
@@ -202,15 +204,6 @@ async fn modify_point(req: HttpRequest, payload: web::Json<ModifyPointRequest>, 
     )
 }
 
-// fetch("modify_point", {
-//     method: 'PUT',
-//     headers: {
-//       'Accept': 'application/json',
-//       'Content-Type': 'application/json'
-//     },
-//     body: JSON.stringify({id: await e.info.id, ...e.info})
-//   })
-
 #[get("/")]
 async fn redirect_index(_req: HttpRequest) -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Found()
@@ -219,22 +212,33 @@ async fn redirect_index(_req: HttpRequest) -> Result<HttpResponse, Error> {
     )
 }
 
+#[derive(Clone)]
+struct DataPaths
+{
+    www_path: PathBuf,
+    data_path: PathBuf,
+}
+
 #[get("/{filename:.*}/")]
-async fn index(req: HttpRequest) -> Result<fs::NamedFile, Error> {
-    let path: std::path::PathBuf = req.match_info().query("filename").parse().unwrap();
-    let file = fs::NamedFile::open(Path::new("data/www").join(path))?;
+async fn index(req: HttpRequest, paths: web::Data<DataPaths>) -> Result<fs::NamedFile, Error> {
+
+    let path: PathBuf = req.match_info().query("filename").parse().unwrap();
+    let file = fs::NamedFile::open(paths.www_path.join(path))?;
     Ok(file)
 }
 
 #[get("/maps/{filename:.*}/")]
-async fn map_imgs(req: HttpRequest) -> Result<fs::NamedFile, Error> {
-    let path: std::path::PathBuf = req.match_info().query("filename").parse().unwrap();
-    let file = fs::NamedFile::open(Path::new("data/maps").join(path))?;
+async fn map_imgs(req: HttpRequest, paths: web::Data<DataPaths>) -> Result<fs::NamedFile, Error> {
+    let path: PathBuf = req.match_info().query("filename").parse().unwrap();
+    let path: PathBuf = [paths.data_path.as_path(), Path::new("maps"), path.as_path()].iter().collect();
+    println!("trying to open {:?}", path);
+    let file = fs::NamedFile::open(path)?;
     Ok(file)
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+
     // set environment variables
     std::env::set_var("RUST_LOG", "actix_web=info");
     dotenv::dotenv().ok(); // ignore errors, i.e. file is not found
@@ -242,8 +246,15 @@ async fn main() -> std::io::Result<()> {
     // set global logging (uses RUST_LOG env variable)
     env_logger::init();
 
+    // setup server paths
+    let paths = DataPaths {
+        www_path: PathBuf::from(std::env::var("MAPSERVER_WWW_PATH").expect("no env variable MAPSERVER_WWW_PATH")),
+        data_path: PathBuf::from(std::env::var("MAPSERVER_DATA_PATH").expect("no env variable MAPSERVER_DATA_PATH")),
+    };
+
     // create r2d2 pool to DB
-    let connspec = std::env::var("DATABASE_URL").expect("no env variable DATABASE_URL");
+    let connspec = std::env::var("MAPSERVER_DATABASE_URL").expect("no env variable MAPSERVER_DATABASE_URL");
+    println!("Connecting to DB at: {}", connspec);
     let manager = ConnectionManager::<SqliteConnection>::new(connspec);
     let pool: db::Pool = r2d2::Pool::builder()
         .build(manager)
@@ -253,12 +264,13 @@ async fn main() -> std::io::Result<()> {
         count: AtomicI32::new( db::actions::count_points(&pool.get().unwrap()).unwrap() ),
     });
 
-    let bind = std::env::var("SERVER_ADDR").expect("no env variable SERVER_ADDR");
+    let bind = std::env::var("MAPSERVER_SERVER_ADDR").expect("no env variable MAPSERVER_SERVER_ADDR");
     println!("Starting server at: {}", &bind);
 
     HttpServer::new(move || {
         App::new()
         .data(pool.clone())
+        .data(paths.clone())
         .app_data(id_counter.clone())
         .app_data(web::JsonConfig::default()
             .limit(4096)
@@ -298,8 +310,6 @@ async fn main() -> std::io::Result<()> {
                 .service(map_imgs)
                 .service(index)
         )
-        // .service()
-        // .service(fs::Files::new("/static", "./data/www").show_files_listing())
     })
     .bind(&bind)?
     .run()
