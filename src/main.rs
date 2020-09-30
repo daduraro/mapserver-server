@@ -46,7 +46,6 @@ struct MapData {
 async fn get_map_info(map: &models::Map, path: &Path) -> Result<MapData, Error> {
     let contents = {
         let path: PathBuf = [path, Path::new("maps"),  Path::new(&map.fpath), Path::new("ImageProperties.xml")].iter().collect();
-        println!("Looking for file {:?}", path);
         let mut file = 
             web::block(move || File::open(path))
             .await
@@ -84,10 +83,8 @@ async fn get_map_info(map: &models::Map, path: &Path) -> Result<MapData, Error> 
 }
 
 async fn data_json(req: HttpRequest, pool: web::Data<db::Pool>, paths: web::Data<DataPaths>) -> Result<HttpResponse, Error> {
-    println!("hey?");
     let map = get_map(&req, pool.as_ref()).await?;
     if let Some(map) = map {
-        println!("map is {:?}", map);
         let body = serde_json::to_string(&get_map_info(&map, &paths.data_path).await?)?;
         Ok(HttpResponse::Ok()
             .content_type("application/json")
@@ -209,7 +206,6 @@ async fn modify_point(req: HttpRequest, payload: web::Json<ModifyPointRequest>, 
 async fn redirect_index(req: HttpRequest) -> Result<HttpResponse, Error> {
     let path = req.uri().path();
     let path = format!("{}/index.html", path);
-    println!("Redirect to {}", path);
     Ok(HttpResponse::Found()
         .header(header::LOCATION,  path)
         .finish()
@@ -235,7 +231,6 @@ async fn index(req: HttpRequest, paths: web::Data<DataPaths>) -> Result<fs::Name
 async fn map_imgs(req: HttpRequest, paths: web::Data<DataPaths>) -> Result<fs::NamedFile, Error> {
     let path: PathBuf = req.match_info().query("filename").parse().unwrap();
     let path: PathBuf = [paths.data_path.as_path(), Path::new("maps"), path.as_path()].iter().collect();
-    println!("trying to open {:?}", path);
     let file = fs::NamedFile::open(path)?;
     Ok(file)
 }
@@ -258,7 +253,6 @@ async fn main() -> std::io::Result<()> {
 
     // create r2d2 pool to DB
     let connspec = std::env::var("MAPSERVER_DATABASE_URL").expect("no env variable MAPSERVER_DATABASE_URL");
-    println!("Connecting to DB at: {}", connspec);
     let manager = ConnectionManager::<SqliteConnection>::new(connspec);
     let pool: db::Pool = r2d2::Pool::builder()
         .build(manager)

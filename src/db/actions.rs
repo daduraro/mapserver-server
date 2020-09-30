@@ -59,7 +59,6 @@ pub fn delete_points_in_map(map_key: &str, id: i32, conn: &SqliteConnection) -> 
 
 pub fn modify_point_in_map(map_key: &str, req: &models::PointUpdate, conn: &SqliteConnection) -> Result<(), Error>
 {
-    println!("Modify {:?}", req);
     use super::schema::*;
     diesel::update(points::table
         .filter(points::id.eq(req.id))
