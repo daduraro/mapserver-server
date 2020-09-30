@@ -46,6 +46,7 @@ struct MapData {
 async fn get_map_info(map: &models::Map, path: &Path) -> Result<MapData, Error> {
     let contents = {
         let path: PathBuf = [path, Path::new("maps"),  Path::new(&map.fpath), Path::new("ImageProperties.xml")].iter().collect();
+        println!("Looking for file {:?}", path);
         let mut file = 
             web::block(move || File::open(path))
             .await
@@ -205,9 +206,12 @@ async fn modify_point(req: HttpRequest, payload: web::Json<ModifyPointRequest>, 
 }
 
 #[get("/")]
-async fn redirect_index(_req: HttpRequest) -> Result<HttpResponse, Error> {
+async fn redirect_index(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let path = req.uri().path();
+    let path = format!("{}/index.html", path);
+    println!("Redirect to {}", path);
     Ok(HttpResponse::Found()
-        .header(header::LOCATION, "index.html")
+        .header(header::LOCATION,  path)
         .finish()
     )
 }
