@@ -204,8 +204,8 @@ async fn modify_point(req: HttpRequest, payload: web::Json<ModifyPointRequest>, 
 
 #[get("/")]
 async fn redirect_index(req: HttpRequest) -> Result<HttpResponse, Error> {
-    let path = req.uri().path();
-    let path = format!("{}/index.html", path);
+    let path = req.uri().path(); // guaranteed to end with '/'
+    let path = format!("{}index.html", path);
     Ok(HttpResponse::Found()
         .header(header::LOCATION,  path)
         .finish()
@@ -234,6 +234,13 @@ async fn map_imgs(req: HttpRequest, paths: web::Data<DataPaths>) -> Result<fs::N
     let file = fs::NamedFile::open(path)?;
     Ok(file)
 }
+
+async fn favicon(_req: HttpRequest, paths: web::Data<DataPaths>) -> Result<fs::NamedFile, Error> {
+    let path: PathBuf = [paths.www_path.as_path(), Path::new("favicon.svg")].iter().collect();
+    let file = fs::NamedFile::open(path)?;
+    Ok(file)
+}
+
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -308,8 +315,10 @@ async fn main() -> std::io::Result<()> {
                 .service(map_imgs)
                 .service(index)
         )
+        .service(web::resource("/favicon.ico/").route(web::get().to(favicon)))
     })
     .bind(&bind)?
     .run()
     .await
 }
+
