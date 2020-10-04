@@ -52,3 +52,7 @@ There are two tables, `points` and `maps`:
     + `coordy`: the floating-point y-coordinate of the point.
     + `title`: the title of the point, can be null.
     + `body`: the description of the point, can be null.
+
+# Disclaimer
+
+This is a very early-stage pet project. It can (and will) contain critical security issues.
